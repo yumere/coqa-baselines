@@ -78,7 +78,7 @@ class CoqaDataset(Dataset):
 
         paragraph_ids = self.tokenizer.convert_tokens_to_ids(paragraph['annotated_context'])
         if len(input_ids) + len(paragraph_ids) > self.args.max_sequence_length:
-            paragraph_ids = paragraph_ids[: (self.args.max_sequence_length - len(input_ids))]
+            paragraph_ids = paragraph_ids[: (self.args.max_sequence_length - len(input_ids) - 1)]
         input_ids += paragraph_ids
         input_mask += [1] * len(paragraph_ids)
         segment_ids += [1] * len(paragraph_ids)
