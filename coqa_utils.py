@@ -16,11 +16,11 @@ UNK = ' unknown'
 
 
 class CoqaDataset(Dataset):
-    def __init__(self, filename, config, tokenizer):
+    def __init__(self, filename, tokenizer, args):
         super(CoqaDataset, self).__init__()
 
         self.filename = filename
-        self.config = config
+        self.args = args
         self.tokenizer = tokenizer
 
         paragraph_lens = []
@@ -35,7 +35,7 @@ class CoqaDataset(Dataset):
                 qas['paragraph_id'] = len(self.paragraphs)
 
                 temp = ["[CLS]"]
-                n_history = len(history) if config['n_history'] < 0 else min(config['n_history'], len(history))
+                n_history = len(history) if args.n_history < 0 else min(args.n_history, len(history))
 
                 if n_history > 0:
                     for i, (q, a) in enumerate(history[-n_history:]):
@@ -72,26 +72,26 @@ class CoqaDataset(Dataset):
                   'evidence': paragraph['annotated_context'],
                   'targets': qas['answer_span']}
 
-        input_ids = tokenizer.convert_tokens_to_ids(question)
+        input_ids = self.tokenizer.convert_tokens_to_ids(question)
+        input_mask = [1] * len(input_ids)
         segment_ids = [0] * len(input_ids)
-        input_mask = [0] * len(input_ids)
 
-        paragraph_ids = tokenizer.convert_tokens_to_ids(paragraph['annotated_context'])
-        if len(input_ids) + len(paragraph_ids) > self.config["max_sequence_length"]:
+        paragraph_ids = self.tokenizer.convert_tokens_to_ids(paragraph['annotated_context'])
+        if len(input_ids) + len(paragraph_ids) > self.args.max_sequence_length:
             paragraph_ids = paragraph_ids[: len(paragraph_ids) - len(input_ids)]
         input_ids += paragraph_ids
-        segment_ids += [1] * len(paragraph_ids)
         input_mask += [1] * len(paragraph_ids)
+        segment_ids += [1] * len(paragraph_ids)
 
-        input_ids += tokenizer.convert_tokens_to_ids(["[SEP]"])
-        segment_ids += [1]
+        input_ids += self.tokenizer.convert_tokens_to_ids(["[SEP]"])
         input_mask += [1]
+        segment_ids += [1]
 
-        while len(input_ids) < self.config["max_sequence_length"]:
+        while len(input_ids) < self.args.max_sequence_length:
             input_ids += [0]
             segment_ids += [0]
             input_mask += [0]
-        assert len(input_ids) == len(segment_ids) == len(input_mask) == self.config['max_sequence_length']
+        assert len(input_ids) == len(segment_ids) == len(input_mask) == self.args.max_sequence_length
 
         start_position, end_position = sample['targets']
         start_position += len(question)
@@ -104,8 +104,8 @@ class CoqaDataset(Dataset):
     def collate_fn(data):
         input_ids, segment_ids, input_mask, start_positions, end_positions = list(zip(*data))
         input_ids = torch.tensor(input_ids, dtype=torch.long)
-        segment_ids = torch.tensor(segment_ids, dtype=torch.uint8)
-        input_mask = torch.tensor(input_mask, dtype=torch.uint8)
+        segment_ids = torch.tensor(segment_ids, dtype=torch.long)
+        input_mask = torch.tensor(input_mask, dtype=torch.long)
         start_positions = torch.tensor(start_positions, dtype=torch.long)
         end_positions = torch.tensor(end_positions, dtype=torch.long)
 
@@ -348,6 +348,9 @@ if __name__ == '__main__':
     parser.add_argument("--bert_model", type=str, default="bert-base-uncased")
     parser.add_argument('--do_lower_case', action='store_true', default=False)
     parser.add_argument('--prepro', action='store_true', default=False)
+
+    parser.add_argument('--n_history', type=int, default=2)
+    parser.add_argument('--max_sequence_length', type=int, default=384)
     args = parser.parse_args()
 
     if args.prepro:
@@ -356,7 +359,7 @@ if __name__ == '__main__':
     else:
         from torch.utils.data import DataLoader
         tokenizer = BertTokenizer.from_pretrained(args.bert_model)
-        dataset = CoqaDataset("./coqa-dataset/processed-train-10.json", {"n_history": 2, "max_sequence_length": 384}, tokenizer)
+        dataset = CoqaDataset("./coqa-dataset/processed-train-10.json", args, tokenizer)
         loader = DataLoader(dataset, batch_size=2, shuffle=False, collate_fn=CoqaDataset.collate_fn, pin_memory=True)
 
         for i, d in enumerate(loader):
