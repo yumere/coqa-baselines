@@ -3,118 +3,50 @@ import json
 import re
 import string
 from collections import Counter
+from collections import namedtuple
 
 import torch
+from dataclasses import dataclass
 from torch.utils.data import Dataset
 from tqdm import tqdm
 from transformers import BertTokenizer
 
-__all__ = ["CoqaDataset"]
+__all__ = ["CoqaDataset", "InputFeature"]
 
 
 UNK = ' unknown'
 
 
 class CoqaDataset(Dataset):
-    def __init__(self, filename, tokenizer, args):
+    def __init__(self, filename, args):
         super(CoqaDataset, self).__init__()
-
-        self.filename = filename
         self.args = args
-        self.tokenizer = tokenizer
-
-        paragraph_lens = []
-        question_lens = []
-        self.paragraphs = []
-        self.examples = []
-        dataset = json.load(open(filename, "rt"))
-
-        for paragraph in dataset:
-            history = []
-            for qas in paragraph['qas']:
-                qas['paragraph_id'] = len(self.paragraphs)
-
-                temp = ["[CLS]"]
-                n_history = len(history) if args.n_history < 0 else min(args.n_history, len(history))
-
-                if n_history > 0:
-                    for i, (q, a) in enumerate(history[-n_history:]):
-                        d = n_history - i
-                        temp.extend(q)
-                        temp.append("[SEP]")
-                        temp.extend(a)
-                        temp.append("[SEP]")
-
-                temp.extend(qas['annotated_question'])
-                temp.append("[SEP]")
-                history.append((qas['annotated_question'], qas['annotated_answer']))
-                qas['annotated_question'] = temp
-                self.examples.append(qas)
-                question_lens.append(len(qas['annotated_question']))
-                paragraph_lens.append(len(paragraph['annotated_context']))
-            self.paragraphs.append(paragraph)
+        self.dataset = torch.load(open(filename, "rb"))
 
     def __len__(self):
-        return len(self.examples)
+        return len(self.dataset)
 
     def __getitem__(self, item):
-        qas = self.examples[item]
-        paragraph = self.paragraphs[qas['paragraph_id']]
-        question = qas['annotated_question']
-        answers = [qas['answer']]
+        return self.dataset[item]
 
-        if 'additional_answers' in qas:
-            answers = answers + qas['additional_answers']
 
-        sample = {'id': (paragraph['id'], qas['turn_id']),
-                  'question': question,
-                  'answers': answers,
-                  'evidence': paragraph['annotated_context'],
-                  'targets': qas['answer_span']}
+def _check_is_max_context(doc_spans, cur_span_index, position):
+    best_score = None
+    best_span_index = None
+    for (span_index, doc_span) in enumerate(doc_spans):
+        end = doc_span.start + doc_span.length - 1
+        if position < doc_span.start:
+            continue
+        if position > end:
+            continue
+        num_left_context = position - doc_span.start
+        num_right_context = end - position
+        score = min(num_left_context, num_right_context) + 0.01 * doc_span.length
+        if best_score is None or score > best_score:
+            best_score = score
+            best_span_index = span_index
 
-        input_ids = self.tokenizer.convert_tokens_to_ids(question)
-        input_mask = [1] * len(input_ids)
-        segment_ids = [0] * len(input_ids)
-
-        paragraph_ids = self.tokenizer.convert_tokens_to_ids(paragraph['annotated_context'])
-        if len(input_ids) + len(paragraph_ids) > self.args.max_sequence_length:
-            paragraph_ids = paragraph_ids[: (self.args.max_sequence_length - len(input_ids) - 1)]
-        input_ids += paragraph_ids
-        input_mask += [1] * len(paragraph_ids)
-        segment_ids += [1] * len(paragraph_ids)
-
-        input_ids += self.tokenizer.convert_tokens_to_ids(["[SEP]"])
-        input_mask += [1]
-        segment_ids += [1]
-
-        while len(input_ids) < self.args.max_sequence_length:
-            input_ids += [0]
-            segment_ids += [0]
-            input_mask += [0]
-        assert len(input_ids) == len(segment_ids) == len(input_mask) == self.args.max_sequence_length
-
-        start_position, end_position = sample['targets']
-        start_position += len(question)
-        end_position += len(question)
-
-        return input_ids, segment_ids, input_mask, start_position, end_position
-
-    @staticmethod
-    def collate_fn(data):
-        input_ids, segment_ids, input_mask, start_positions, end_positions = list(zip(*data))
-        input_ids = torch.tensor(input_ids, dtype=torch.long)
-        segment_ids = torch.tensor(segment_ids, dtype=torch.long)
-        input_mask = torch.tensor(input_mask, dtype=torch.long)
-        start_positions = torch.tensor(start_positions, dtype=torch.long)
-        end_positions = torch.tensor(end_positions, dtype=torch.long)
-
-        return {
-            "input_ids": input_ids,
-            "segment_ids": segment_ids,
-            "input_mask": input_mask,
-            "start_positions": start_positions,
-            "end_positions": end_positions
-        }
+    return cur_span_index == best_span_index
 
 
 def is_whitespace(c):
@@ -197,6 +129,31 @@ def _improve_answer_span(doc_tokens, input_start, input_end, tokenizer, orig_ans
     return input_start, input_end
 
 
+@dataclass
+class InputFeature:
+    unique_id: str
+    paragraph_id: int
+    turn_id: int
+    doc_span_index: int
+
+    context: str
+
+    question: str
+    answer: str
+    annotated_question: list
+    annotated_answer: list
+
+    tokens: list
+
+    start_position: int
+    end_position: int
+
+    input_ids: list
+    segment_ids: list
+    input_mask: list
+
+
+
 def preprocess(args):
     tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=args.do_lower_case)
 
@@ -236,7 +193,7 @@ def preprocess(args):
         dataset = json.load(f)
 
     data = []
-    for i, datum in enumerate(tqdm(dataset['data'], desc="Data", ncols=85)):
+    for paragraph_id, datum in enumerate(tqdm(dataset['data'], desc="Data", ncols=85)):
         context_str = datum["story"] + UNK
         _datum = {"context": context_str,
                   "source": datum["source"],
@@ -249,6 +206,10 @@ def preprocess(args):
         doc_tokens, all_doc_tokens, char_to_word_offset, tok_to_orig_index, orig_to_tok_index = process(context_str, tokenize=True)
 
         _datum["annotated_context"] = all_doc_tokens
+        _datum["char_to_word_offset"] = char_to_word_offset
+        _datum["tok_to_orig_index"] = tok_to_orig_index
+        _datum["orig_to_tok_index"] = orig_to_tok_index
+
         assert len(datum["questions"]) == len(datum["answers"])
 
         additional_answers = {}
@@ -336,8 +297,138 @@ def preprocess(args):
 
             _datum['qas'].append(_qas)
         data.append(_datum)
-    with open(args.output_file, "wt") as f:
-        json.dump(data, f, sort_keys=True, indent=4)
+
+    paragraph_lens = []
+    question_lens = []
+    paragraphs = []
+    examples = []
+
+    for paragraph_id, paragraph in enumerate(data):
+        history = []
+        for qas in paragraph['qas']:
+            tok_start, tok_end = qas['answer_span']
+            qas['paragraph_id'] = paragraph_id
+
+            temp = []
+            n_history = len(history) if args.n_history < 0 else min(args.n_history, len(history))
+
+            if n_history > 0:
+                for i, (q, a) in enumerate(history[-n_history:]):
+                    d = n_history - i
+                    temp.extend(q)
+                    temp.extend(a)
+
+            temp.extend(qas['annotated_question'])
+            history.append((qas['annotated_question'], qas['annotated_answer']))
+            qas['annotated_question'] = temp
+
+            question = qas['annotated_question']
+            answers = [qas['answer']]
+            if "additional_answers" in qas:
+                answers = answers + qas['additional_answers']
+
+            sample = {'id': (paragraph['id'], qas['turn_id']),
+                      'question': question,
+                      'answers': answers,
+                      'evidence': paragraph['annotated_context']}
+
+            max_tokens_for_doc = args.max_sequence_length - len(question) - 3
+
+            _DocSpan = namedtuple("DocSpan", ["start", "length"])
+            doc_spans = []
+            start_offset = 0
+            all_doc_tokens = paragraph['annotated_context']
+            tok_to_orig_index = paragraph['tok_to_orig_index']
+            orig_to_tok_index = paragraph['orig_to_tok_index']
+            while start_offset < len(all_doc_tokens):
+                length = len(all_doc_tokens) - start_offset
+                if length > max_tokens_for_doc:
+                    length = max_tokens_for_doc
+
+                doc_spans.append(_DocSpan(start=start_offset, length=length))
+                if start_offset + length == len(all_doc_tokens):
+                    break
+                start_offset += min(length, args.doc_stride)
+
+            for doc_span_index, doc_span in enumerate(doc_spans):
+                tokens = []
+                segment_ids = []
+                p_mask = []
+                token_to_orig_map = {}
+                token_is_max_context = {}
+
+                tokens.append("[CLS]")
+                segment_ids.append(0)
+                p_mask.append(1)
+
+                for token in question:
+                    tokens.append(token)
+                    segment_ids.append(0)
+                    p_mask.append(1)
+
+                tokens.append("[SEP]")
+                segment_ids.append(0)
+                p_mask.append(1)
+
+                for i in range(doc_span.length):
+                    split_token_index = doc_span.start + i
+                    token_to_orig_map[len(tokens)] = tok_to_orig_index
+                    is_max_context = _check_is_max_context(doc_spans, doc_span_index, split_token_index)
+                    token_is_max_context[len(tokens)] = is_max_context
+                    tokens.append(all_doc_tokens[split_token_index])
+                    segment_ids.append(1)
+                    p_mask.append(0)
+                paragraph_len = doc_span.length
+
+                tokens.append("[SEP]")
+                segment_ids.append(1)
+                p_mask.append(1)
+
+                input_ids = tokenizer.convert_tokens_to_ids(tokens)
+                input_mask = [1] * len(input_ids)
+
+                while len(input_ids) < args.max_sequence_length:
+                    input_ids.append(0)
+                    input_mask.append(0)
+                    segment_ids.append(0)
+                    p_mask.append(1)
+
+                assert len(input_ids) == len(input_mask) == len(segment_ids) == args.max_sequence_length
+
+                doc_start = doc_span.start
+                doc_end = doc_span.start + doc_span.length - 1
+                out_of_span = False
+
+                if not (tok_start >= doc_start and tok_end <= doc_end):
+                    out_of_span = True
+                if out_of_span:
+                    start_position = 0
+                    end_position = 0
+                    span_is_impossible = True
+                else:
+                    doc_offset = len(question) + 2
+                    start_position = tok_start - doc_start + doc_offset
+                    end_position = tok_end - doc_start + doc_offset
+
+                examples.append(InputFeature(
+                    unique_id=paragraph['id'],
+                    paragraph_id=paragraph_id,
+                    turn_id=qas['turn_id'],
+                    doc_span_index=doc_span_index,
+                    context=paragraph['context'],
+                    question=qas['question'],
+                    answer=qas['answer'],
+                    annotated_question=qas['annotated_question'],
+                    annotated_answer=qas['annotated_answer'],
+                    tokens=tokens,
+                    start_position=start_position,
+                    end_position=end_position,
+                    input_ids=input_ids,
+                    segment_ids=segment_ids,
+                    input_mask=input_mask
+                ))
+    with open(args.output_file, "wb") as f:
+        torch.save(examples, f)
 
 
 if __name__ == '__main__':
@@ -350,6 +441,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--n_history', type=int, default=2)
     parser.add_argument('--max_sequence_length', type=int, default=384)
+    parser.add_argument('--doc_stride', type=int, default=128)
     args = parser.parse_args()
 
     if args.prepro:
@@ -357,12 +449,20 @@ if __name__ == '__main__':
 
     else:
         from torch.utils.data import DataLoader
-        tokenizer = BertTokenizer.from_pretrained(args.bert_model)
-        dataset = CoqaDataset("./coqa-dataset/processed-train-10.json", args, tokenizer)
-        loader = DataLoader(dataset, batch_size=2, shuffle=False, collate_fn=CoqaDataset.collate_fn, pin_memory=True)
+
+        dataset = CoqaDataset("./coqa-dataset/processed-train-50.pkl", args)
+        loader = DataLoader(dataset, batch_size=2, shuffle=False, collate_fn=lambda x: x)
 
         for i, d in enumerate(loader):
             print(d)
+
+            batch = {
+                'input_ids': torch.tensor([z.input_ids for z in d]),
+                'segment_ids': torch.tensor([z.segment_ids for z in d]),
+                'input_mask': torch.tensor([z.input_mask for z in d]),
+                'start_positions': torch.tensor([z.start_position for z in d]),
+                'end_positions': torch.tensor([z.end_position for z in d])
+            }
             if i > 5:
                 break
 

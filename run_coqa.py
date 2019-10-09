@@ -1,5 +1,6 @@
 from __future__ import absolute_import, division, print_function
-
+from coqa_utils import InputFeature
+from typing import List
 import argparse
 import glob
 import logging
@@ -36,7 +37,7 @@ def train(args, train_dataset, model, tokenizer):
     tb_writer = SummaryWriter(args.output_dir)
 
     args.train_batch_size = args.train_batch_size * max(1, args.n_gpu)
-    train_dataloader = DataLoader(train_dataset, batch_size=args.train_batch_size, collate_fn=CoqaDataset.collate_fn, shuffle=False)
+    train_dataloader = DataLoader(train_dataset, shuffle=False, batch_size=args.train_batch_size, collate_fn=lambda x: x)
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -81,13 +82,21 @@ def train(args, train_dataset, model, tokenizer):
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration")
+        batch: List[InputFeature]
         for step, batch in enumerate(epoch_iterator):
             model.train()
-            inputs = {'input_ids': batch['input_ids'].to(args.device),
-                      'attention_mask': batch['input_mask'].to(args.device),
-                      'token_type_ids': batch['segment_ids'].to(args.device),
-                      'start_positions': batch['start_positions'].to(args.device),
-                      'end_positions': batch['end_positions'].to(args.device)}
+            inputs = {
+                'input_ids': torch.tensor([b.input_ids for b in batch]).to(args.device),
+                'attention_mask': torch.tensor([b.input_mask for b in batch]).to(args.device),
+                'token_type_ids': torch.tensor([b.segment_ids for b in batch]).to(args.device),
+                'start_positions': torch.tensor([b.start_position for b in batch]).to(args.device),
+                'end_positions': torch.tensor([b.end_position for b in batch]).to(args.device)
+            }
+            # inputs = {'input_ids': batch['input_ids'].to(args.device),
+            #           'attention_mask': batch['input_mask'].to(args.device),
+            #           'token_type_ids': batch['segment_ids'].to(args.device),
+            #           'start_positions': batch['start_positions'].to(args.device),
+            #           'end_positions': batch['end_positions'].to(args.device)}
 
             outputs = model(**inputs)
             loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
@@ -305,7 +314,7 @@ def main():
 
     # Training
     if args.do_train:
-        train_dataset = CoqaDataset(args.train_file, tokenizer, args)
+        train_dataset = CoqaDataset(args.train_file, args)
         # train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=False)
         global_step, tr_loss = train(args, train_dataset, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
