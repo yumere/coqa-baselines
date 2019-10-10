@@ -1,11 +1,11 @@
 from __future__ import absolute_import, division, print_function
-from coqa_utils import InputFeature
-from typing import List
+
 import argparse
 import glob
 import logging
 import os
 import random
+from typing import List
 
 import numpy as np
 import torch
@@ -16,6 +16,7 @@ from transformers import AdamW, WarmupLinearSchedule
 from transformers import (WEIGHTS_NAME, BertConfig, BertForQuestionAnswering, BertTokenizer)
 
 from coqa_utils import CoqaDataset
+from coqa_utils import InputFeature
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ def train(args, train_dataset, model, tokenizer):
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch")
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
     for _ in train_iterator:
-        epoch_iterator = tqdm(train_dataloader, desc="Iteration")
+        epoch_iterator = tqdm(train_dataloader, desc="Iteration", ncols=85)
         batch: List[InputFeature]
         for step, batch in enumerate(epoch_iterator):
             model.train()
@@ -92,11 +93,6 @@ def train(args, train_dataset, model, tokenizer):
                 'start_positions': torch.tensor([b.start_position for b in batch]).to(args.device),
                 'end_positions': torch.tensor([b.end_position for b in batch]).to(args.device)
             }
-            # inputs = {'input_ids': batch['input_ids'].to(args.device),
-            #           'attention_mask': batch['input_mask'].to(args.device),
-            #           'token_type_ids': batch['segment_ids'].to(args.device),
-            #           'start_positions': batch['start_positions'].to(args.device),
-            #           'end_positions': batch['end_positions'].to(args.device)}
 
             outputs = model(**inputs)
             loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
@@ -142,10 +138,11 @@ def train(args, train_dataset, model, tokenizer):
                     torch.save(args, os.path.join(output_dir, 'training_args.bin'))
                     logger.info("Saving model checkpoint to %s", output_dir)
 
-            if args.max_steps > 0 and global_step > args.max_steps:
+            if 0 < args.max_steps < global_step:
                 epoch_iterator.close()
                 break
-        if args.max_steps > 0 and global_step > args.max_steps:
+
+        if 0 < args.max_steps < global_step:
             train_iterator.close()
             break
 
@@ -171,7 +168,7 @@ def evaluate(args, model, tokenizer, prefix=""):
     logger.info("  Num examples = %d", len(dataset))
     logger.info("  Batch size = %d", args.eval_batch_size)
     all_results = []
-    for batch in tqdm(eval_dataloader, desc="Evaluating"):
+    for batch in tqdm(eval_dataloader, desc="Evaluating", ncols=85):
         model.eval()
         batch = tuple(t.to(args.device) for t in batch)
         with torch.no_grad():
